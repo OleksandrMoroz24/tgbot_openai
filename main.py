@@ -85,39 +85,61 @@ async def process_location(message: types.Message, state: FSMContext):
 # Функція для переходу до наступного питання або завершення чек-листа
 async def next_question_or_finish(current_question, state: FSMContext, message: types.Message):
     if current_question < 5:
+        # Якщо є наступне питання
         await Survey.AnsweringQuestions.set()
         await message.answer(f"Питання {current_question + 1}:", reply_markup=answers_kb)
     else:
+        # Якщо це було останнє питання, формуємо і відсилаємо звіт
         user_data = await state.get_data()
         report = format_report(user_data)
         await message.answer(report, reply_markup=types.ReplyKeyboardRemove())
-        await state.finish()  # Важливо завершити стан після формування звіту
+        await state.finish()
 
 # Обробник відповідей на питання
 @dp.message_handler(state=Survey.AnsweringQuestions)
 async def process_question(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
-    answers = user_data.get("answers", {})
-    current_question = len(answers) + 1
+    current_question = len(user_data.get("answers", {})) + 1
 
     if message.text == "Залишити коментар":
+        # Ініціалізація temp_answer з порожнім списком photos
+        temp_answer = {"question": current_question, "comment": "", "photos": []}
+        await state.update_data(temp_answer=temp_answer)
+
+        # Перехід до стану додавання коментаря
         await Survey.AddingComment.set()
         await message.answer("Будь ласка, залиште свій коментар:")
     else:
-        answers[f"Питання {current_question}"] = message.text
+        # Якщо користувач відповідає чимось іншим, зберігаємо відповідь і переходимо до наступного питання
+        answers = user_data.get("answers", {})
+        answers[current_question] = {"comment": message.text, "photos": []}
         await state.update_data(answers=answers)
         await next_question_or_finish(current_question, state, message)
 
 # Обробник для коментарів
 @dp.message_handler(state=Survey.AddingComment)
 async def process_comment(message: types.Message, state: FSMContext):
-    await state.update_data(comment=message.text)
-    await message.answer("Якщо бажаєте завантажити фотографію, натисніть кнопку нижче або пропустіть цей крок.", reply_markup=photo_kb)
+    # Отримання всіх даних з контексту
+    user_data = await state.get_data()
+    temp_answer = user_data.get("temp_answer", {})
+
+    # Оновлення коментаря у тимчасовій відповіді
+    temp_answer["comment"] = message.text
+
+    # Збереження оновленої тимчасової відповіді назад у контекст
+    await state.update_data(temp_answer=temp_answer)
+
+    # Встановлення наступного стану
     await Survey.UploadingPhoto.set()
+    await message.answer("Якщо бажаєте завантажити фотографію, натисніть кнопку нижче або пропустіть цей крок.", reply_markup=photo_kb)
+
 
 # Обробник завантаження фото або пропускання цього кроку
 @dp.message_handler(content_types=ContentTypes.PHOTO, state=Survey.UploadingPhoto)
 async def process_photo(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    temp_answer = user_data.get("temp_answer", {"photos": []})  # Забезпечуємо наявність ключа "photos"
+
     document_id = message.photo[-1].file_id
     file_info = await bot.get_file(document_id)
     file_path = file_info.file_path
@@ -128,12 +150,12 @@ async def process_photo(message: types.Message, state: FSMContext):
                 file_content = await resp.read()
                 file_path_s3 = f"photos/{message.from_user.id}/{file_path.split('/')[-1]}"
                 file_url = await upload_to_s3(file_path_s3, file_content)
-                # Збереження URL фотографії у стан
-                user_data = await state.get_data()
-                photos = user_data.get("photos", [])
-                photos.append(file_url)
-                await state.update_data(photos=photos)
-                await message.answer(f"Фото було завантажено: {file_url}")
+                if file_url:
+                    temp_answer["photos"].append(file_url)  # Тепер це безпечно, оскільки "photos" гарантовано існує
+                    await state.update_data(temp_answer=temp_answer)
+                    await message.answer(f"Фото було завантажено: {file_url}")
+                else:
+                    await message.answer("Не вдалося завантажити фото.")
             else:
                 await message.answer("Не вдалося завантажити фото.")
 
@@ -147,14 +169,14 @@ async def skip_photo(message: types.Message, state: FSMContext):
 async def proceed_to_next_step(state: FSMContext, message: types.Message):
     user_data = await state.get_data()
     answers = user_data.get("answers", {})
-    comment = user_data.get("comment", "")
-    photos = user_data.get("photos", [])
-    current_question = len(answers) + 1
+    temp_answer = user_data.get("temp_answer", {})
+    current_question = temp_answer.get("question", len(answers) + 1)
 
-    answers[f"Питання {current_question}"] = f"Коментар: {comment}, Фото: {photos}"
+    answers[current_question] = temp_answer
     await state.update_data(answers=answers)
 
     await next_question_or_finish(current_question, state, message)
+
 
 
 # Допоміжна функція для формування звіту
@@ -163,8 +185,14 @@ def format_report(data):
     answers = data.get("answers", {})
     report = f"Локація: {location}\n"
 
-    for i, answer in enumerate(answers.values(), 1):
-        report += f"Питання {i}: {answer}\n"
+    for question_num, answer_info in answers.items():
+        comment = answer_info.get("comment", "Все чисто")
+        photos = answer_info.get("photos", [])
+        if photos:  # Якщо є фото, форматуємо їх як список
+            photos_str = ", ".join(photos)
+            report += f"Питання {question_num}: Коментар: {comment}, Фото: [{photos_str}]\n"
+        else:
+            report += f"Питання {question_num}: {comment}\n"
 
     return report
 
