@@ -7,6 +7,10 @@ from botocore.exceptions import NoCredentialsError
 
 
 async def upload_to_s3(file_path, file_content):
+    """
+    Функція, яка відповідає за завантаження фотографій користувача
+    на AWS S3 bucket і надає посилання на зображення для перегляду
+    """
     bucket_name = os.getenv("AWS_S3_BUCKET_NAME")
     s3 = boto3.client(
         "s3",
@@ -15,7 +19,7 @@ async def upload_to_s3(file_path, file_content):
         region_name=os.getenv("AWS_S3_REGION_NAME"),
     )
 
-    content_type, _ = mimetypes.guess_type(file_path)
+    content_type, _ = mimetypes.guess_type(file_path)   # визначення типу зображення для коректного відображення
     if content_type is None:
         content_type = "application/octet-stream"
 

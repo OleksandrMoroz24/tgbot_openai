@@ -1,5 +1,4 @@
 import aiohttp
-import requests
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -11,6 +10,7 @@ import os
 from s3_photo_handler import upload_to_s3
 from chatgpt_analyzer import analyze_report_with_openai
 
+# завантаження системний змінних
 load_dotenv()
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 storage = MemoryStorage()
@@ -40,7 +40,7 @@ class Survey(StatesGroup):
     UploadingPhoto = State()
 
 
-# Початок роботи бота
+# Початок роботи бота з привітальним повідомленням
 @dp.message_handler(commands=["start"], state="*")
 async def cmd_start(message: types.Message):
     await Survey.ChoosingLocation.set()
@@ -50,11 +50,16 @@ async def cmd_start(message: types.Message):
     )
 
 
-# Обробник вибору локації
 @dp.message_handler(
-    lambda message: message.text.startswith("Локація"), state=Survey.ChoosingLocation
+    lambda message: message.text.startswith("Локація"),
+    state=Survey.ChoosingLocation
 )
 async def process_location(message: types.Message, state: FSMContext):
+    """
+    Ця функція обробляє відповіді користувачів на вибір локації.
+    Вона оновлює стан бота, щоб зберегти обрану локацію,
+    і переходить до відповідей на запитання.
+    """
     # Встановлення вибраної локації в контексті FSM
     await state.update_data(location=message.text)
     # Оновлення контексту FSM для зберігання відповідей
@@ -64,18 +69,25 @@ async def process_location(message: types.Message, state: FSMContext):
     await message.answer("Питання 1:", reply_markup=answers_kb)
 
 
-# Функція для переходу до наступного питання або завершення чек-листа
 async def next_question_or_finish(
-    current_question, state: FSMContext, message: types.Message
+        current_question,
+        state: FSMContext,
+        message: types.Message
 ):
+    """
+    next_question_or_finish та process_question керують потоком відповідей на
+    запитання в опитуванні. Вони обробляють відповіді користувачів
+    і переходять до наступних запитань або завершують опитування
+    залежно від кількості відповідей на них.
+    """
     if current_question < 5:
-        # Proceed to the next question
+        # Перехід до наступного питання
         await Survey.AnsweringQuestions.set()
         await message.answer(
             f"Питання {current_question + 1}:", reply_markup=answers_kb
         )
     else:
-        # Формування звіту та аналіз черзе чатгпт
+        # Формування звіту
         user_data = await state.get_data()
         report = format_report(user_data)
 
@@ -85,12 +97,14 @@ async def next_question_or_finish(
             for answer in user_data.get("answers", {}).values()
             if "photo_url" in answer
         ]
-
+        # Обробка звіту чатгпт 4
         chat_gpt_response = await analyze_report_with_openai(report, image_urls)
         await message.answer(
             chat_gpt_response, reply_markup=types.ReplyKeyboardRemove()
         )
+
         await state.finish()
+        # Відкат до стану вибору локації
         await Survey.ChoosingLocation.set()
         await message.answer("Оберіть нову локацію:", reply_markup=locations_kb)
 
@@ -138,7 +152,7 @@ async def process_comment(message: types.Message, state: FSMContext):
     )
 
 
-# Обробник завантаження фото або пропускання цього кроку
+# Обробник завантаження фото
 @dp.message_handler(content_types=ContentTypes.PHOTO, state=Survey.UploadingPhoto)
 async def process_photo(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
@@ -146,11 +160,13 @@ async def process_photo(message: types.Message, state: FSMContext):
         "temp_answer", {"photos": []}
     )  # Забезпечуємо наявність ключа "photos"
 
+    # На основі айді фото формуємо посилання для завантаження на с3 бакет
     document_id = message.photo[-1].file_id
     file_info = await bot.get_file(document_id)
     file_path = file_info.file_path
-
+    # Завантаження фото на с3 бакет
     async with aiohttp.ClientSession() as session:
+        # Отримання фото через апі телеграму
         async with session.get(
             f"https://api.telegram.org/file/bot{os.getenv('BOT_TOKEN')}/{file_path}"
         ) as resp:
@@ -160,6 +176,7 @@ async def process_photo(message: types.Message, state: FSMContext):
                     f"photos/{message.from_user.id}/{file_path.split('/')[-1]}"
                 )
                 file_url = await upload_to_s3(file_path_s3, file_content)
+                # Вивід інформації про стан завантаження на с3 бакет
                 if file_url:
                     temp_answer["photos"].append(file_url)
                     await state.update_data(temp_answer=temp_answer)
@@ -170,6 +187,7 @@ async def process_photo(message: types.Message, state: FSMContext):
                 await message.answer("Не вдалося завантажити фото.")
 
 
+# Обробка пропуску завантаження фото
 @dp.message_handler(
     lambda message: message.text == "Пропустити", state=Survey.UploadingPhoto
 )
@@ -190,7 +208,7 @@ async def proceed_to_next_step(state: FSMContext, message: types.Message):
     await next_question_or_finish(current_question, state, message)
 
 
-# Допоміжна функція для формування звіту
+# Функція для формування звіту
 def format_report(data):
     location = data.get("location", "Локація не визначена")
     answers = data.get("answers", {})
@@ -210,7 +228,7 @@ def format_report(data):
     return report
 
 
-# Додатковий обробник
+# Додатковий обробник для завантаження фото
 @dp.message_handler(state=Survey.UploadingPhoto)
 async def photo_not_received(message: types.Message):
     await message.reply(
